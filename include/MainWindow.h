@@ -2,6 +2,7 @@
 #define GLASSYRENDERGUI_MAINWINDOW_H
 
 #include <QtWidgets/QMainWindow>
+#include <QOpenGLWindow>
 
 class MainWindow : public QMainWindow {
     Q_OBJECT

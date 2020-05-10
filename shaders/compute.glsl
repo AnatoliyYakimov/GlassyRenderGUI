@@ -3,9 +3,12 @@
 #define M_PI 3.1415926535897932384626433832795
 
 #define EPS 1e-2
-#define AMBIENT 0.09
-#define IMG_SIZE 4194304
+
 #define SAMPLES_COUNT 1
+#define POINT_LIGHT 0
+#define VECTOR_LIGHT 1
+#define UNIFORM_TEXTURE 0
+#define MAPPED_TEXTURE 1
 
 struct Light {
     vec3 col;
@@ -14,17 +17,23 @@ struct Light {
     uint type;
 };
 
-struct Materal {
-    int alb;
-    int rgh;
-    int ao;
-    int nrm;
+struct Material {
+    uint alb;
+    uint rgh;
+    uint ao;
+    uint nrm;
 };
 
 struct Sphere {
     vec3 center;
     float radius;
-    Materal mat;
+    uint mat;
+    vec3 padding;
+};
+
+struct TextureMeta {
+    vec3 val;
+    uint idx;
 };
 
 struct Intersection {
@@ -32,27 +41,39 @@ struct Intersection {
     vec3 normal;
     vec3 pWorld;
     vec2 pTex;
-    Materal mat;
+    uint mat;
 };
 
-uniform writeonly image2D framebuffer;
+layout (binding = 0, rgba32f) uniform writeonly image2D framebuffer;
 uniform uint size;
 
 layout(binding = 3) buffer SphereBuffer {
     Sphere spheres[];
 };
 
+layout(binding = 4) buffer TextureBuffer {
+    TextureMeta textureMeta[];
+};
+
 layout(binding = 5) buffer LightBuffer {
     Light lights[];
 };
 
-uniform sampler2DArray textures;
+layout(binding = 6) buffer MaterialBuffer {
+    Material materials[];
+};
+
+uniform sampler2DArray textureAtlas;
 
 uniform vec3 eye;
 uniform vec3 ray00;
 uniform vec3 ray01;
 uniform vec3 ray11;
 uniform vec3 ray10;
+
+uniform float ambient;
+uniform uint textureCount;
+uniform uint samplesCount;
 
 //Geometry function
 float G(const float NdotV, const float NdotL, const float rgh);
@@ -63,17 +84,17 @@ vec3 F(const float VdotH, const vec3 F0);
 vec3 lightImpact(const uint idx, const vec3 N, const vec3 p);
 vec3 lightDirection(const uint idx, const vec3 p);
 //BRDF
-vec3 countIrradiance(const vec3 p, const vec3 v, const vec3 n, const vec2 vt, const Materal mat);
+vec3 countIrradiance(const vec3 p, const vec3 v, const vec3 n, const vec2 vt, const uint mat);
 
 bool intersectSphere(int i, const vec3 origin, const vec3 dir, float tMin, float tMax, out Intersection is);
 vec3 trace(const vec3 origin, const vec3 dir);
 bool nearestCollision(const vec3 origin, const vec3 dir, float tMin, float tMax, inout Intersection is);
 bool anyCollision(const vec3 origin, const vec3 dir, float tMin, float tMax);
-vec3 textureAtPoint(const int idx, const vec2 point);
+vec3 textureAtPoint(const uint idx, const vec2 point);
 
 uint nextPowerOfTwo(uint v);
 
-layout (local_size_x = 16, local_size_y = 8) in;
+layout (local_size_x = 32, local_size_y = 32) in;
 void main(void) {
     ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
     ivec2 size = imageSize(framebuffer);
@@ -84,7 +105,6 @@ void main(void) {
     vec3 dir = mix(mix(ray00, ray01, pos.y), mix(ray10, ray11, pos.y), pos.x);
     vec3 col = vec3(0);
     double eps = float(EPS) / float(SAMPLES_COUNT) / 2.0;
-    vec3 dots[SAMPLES_COUNT];
     int lines = int(abs(sqrt(SAMPLES_COUNT)));
     for (int x = 0; x < lines; ++x) {
         for (int y = 0; y < lines; ++y) {
@@ -93,7 +113,6 @@ void main(void) {
         }
     }
     col /= lines * lines;
-    col = col / (0.3 + col);
     imageStore(framebuffer, pix, vec4(col, 0));
 }
 
@@ -102,14 +121,14 @@ float getCoord(uint capacity, uint layer)
     return max(0, min(float(capacity - 1), floor(float(layer) + 0.5)));
 }
 
-vec3 textureAtPoint(const int idx, const vec2 point) {
-    return texture(textures, vec3(point, getCoord(6, idx))).rgb;
+vec3 textureAtPoint(const uint idx, const vec2 point) {
+    return texture(textureAtlas, vec3(point, getCoord(textureCount, idx))).rgb;
 }
 
 vec3 trace(const vec3 origin, const vec3 dir) {
     Intersection is;
     if (nearestCollision(origin, dir, 1, 1000, is)) {
-        return textureAtPoint(is.mat.alb, is.pTex) * AMBIENT + countIrradiance(is.pWorld, dir, is.normal, is.pTex, is.mat);
+        return textureAtPoint(materials[is.mat].alb, is.pTex) * ambient + countIrradiance(is.pWorld, dir, is.normal, is.pTex, is.mat);
     } else {
         return vec3(1.0, 1.0, 1.0);
     }
@@ -167,7 +186,7 @@ bool intersectSphere(int i, const vec3 origin, const vec3 dir, float tMin, float
         vec3 p_world = origin + min * dir;
         vec3 p_local = p_world;
         vec3 p_n = normalize(p_local);
-        float x_t = 0.5 + atan(p_n[2], p_n[0]) / (M_PI / 2);
+        float x_t = 0.5 + atan(p_n[0], p_n[2]) / (M_PI);
         float y_t = 0.5 - asin(p_n[1]) / M_PI;
         vec2 p_texture = vec2(x_t, y_t);
         vec3 normal = normalize(O - p_world);
@@ -183,8 +202,7 @@ vec3 lightImpact(const uint idx, const vec3 N, const vec3 p) {
     float i;
     Light l = lights[idx];
     switch (l.type) {
-        //Point source
-        case 0: {
+        case POINT_LIGHT: {
             vec3 LP = normalize(p - l.v);
             float nrm = length(LP);
             nrm *= nrm;
@@ -192,8 +210,7 @@ vec3 lightImpact(const uint idx, const vec3 N, const vec3 p) {
             i = l.intensity *  LPdotN / nrm;
             break;
         }
-        //Vector source
-        case 1: {
+        case VECTOR_LIGHT: {
             i = l.intensity * dot(l.v, N);
             break;
         }
@@ -204,12 +221,10 @@ vec3 lightImpact(const uint idx, const vec3 N, const vec3 p) {
 vec3 lightDirection(const uint idx, const vec3 p) {
     Light l = lights[idx];
     switch (l.type) {
-        //Point source
-        case 0: {
+        case POINT_LIGHT: {
             return normalize(p - l.v);
         }
-        //Vector source
-        case 1: {
+        case VECTOR_LIGHT: {
             return normalize(l.v);
         }
     }
@@ -233,23 +248,23 @@ vec3 F(const float VdotH, const vec3 F0) {
     return F0 + (vec3(1, 1, 1) - F0) * p;
 }
 //BRDF
-vec3 countIrradiance(const vec3 p, const vec3 v, const vec3 normal, const vec2 vt, const Materal mat) {
+vec3 countIrradiance(const vec3 p, const vec3 v, const vec3 normal, const vec2 vt, const uint mat) {
     vec3 irradiance = vec3(0, 0, 0);
-    vec3 alb = textureAtPoint(mat.alb, vt);
+    vec3 alb = textureAtPoint(materials[mat].alb, vt);
     vec3 Fdiffuse = alb;
     //        return textureAtPoint(mat.alb, vt);
-    float rgh = textureAtPoint(mat.rgh, vt).x;
-    //    float rgh = 0.9;
-    vec3 N = mix(normal, textureAtPoint(mat.nrm, vt), rgh);
-    vec3 frenel = mix(alb, vec3(0.04), rgh);
+    float rgh = textureAtPoint(materials[mat].rgh, vt).x;
     float a = rgh * rgh;
+    //    float rgh = 0.9;
+    vec3 N = mix(normal, textureAtPoint(materials[mat].nrm, vt), rgh);
+    vec3 frenel = mix(alb, vec3(0.04), rgh);
     //        return vec3(rgh);
-    //    vec3 N = normal;
+    //N = normal;
     //                return frenel;
     float ao = 1;
     //            return N;
     float k = (a + 1) * (a + 1) / 8;
-//    k = rgh * rgh / 2;
+    //    k = rgh * rgh / 2;
     float NdotH, NdotL, NdotV, VdotH;
     float _G, _D;
     vec3 _F;
@@ -266,13 +281,13 @@ vec3 countIrradiance(const vec3 p, const vec3 v, const vec3 normal, const vec2 v
         VdotH = max(dot(v, h), 0.0);
         float divider = 4 * NdotL * NdotV + 1e-16;
         _G = G(NdotV, NdotL, k);
-//                return vec3(_G);
+        //        return vec3(_G);
         _D = D(NdotH, a);
-//        return vec3(_D);
+        //        return vec3(_D);
         _F = F(VdotH, frenel);
-//        return _F;
+        //        return _F;
         vec3 Fcook_torrance = _G * _F * _D / divider;
-//        return Fcook_torrance;
+        //        return Fcook_torrance;
         vec3 L = lightImpact(i, N, p);
         //        return L;
         irradiance += (rgh * Fdiffuse + Fcook_torrance) * L;

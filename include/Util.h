@@ -1,6 +1,6 @@
 #ifndef UTIL_H
 #define UTIL_H
-unsigned int nextPowerOfTwo(unsigned int v){
+inline unsigned int nextPowerOfTwo(unsigned int v){
     v--;
     v |= v >> 1;
     v |= v >> 2;
@@ -10,6 +10,32 @@ unsigned int nextPowerOfTwo(unsigned int v){
     v++;
     return v;
 }
+
+class Updatable {
+private:
+    bool needUpdate = false;
+
+public:
+
+    void setNeedToBeUpdated() {
+        needUpdate = true;
+    }
+
+public:
+
+    virtual ~Updatable() {
+
+    }
+
+    void setUpdated() {
+        needUpdate = false;
+    }
+
+    bool isNeedUpdate() {
+        return needUpdate;
+    }
+};
+
 #endif // UTIL_H
 
 
